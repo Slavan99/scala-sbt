@@ -13,9 +13,9 @@ object AverageWordLengthCounter extends App {
   def getWordLengths(words: Array[String], startPos: Int, endPos: Int): Int =
     words.slice(startPos, endPos).map(_.length).sum
 
+  private val executorService = Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors())
   // executors
-  implicit val executionContext: ExecutionContext = ExecutionContext.fromExecutor(
-    Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors()))
+  implicit val executionContext: ExecutionContext = ExecutionContext.fromExecutor(executorService)
   implicit val contextShift: ContextShift[IO] = IO.contextShift(implicitly[ExecutionContext])
 
   // здесь считываем какой-то большой файл
@@ -64,7 +64,6 @@ object AverageWordLengthCounter extends App {
 
   println("Average word length : " + result)
 
-  // Если этого не сделать, то главный поток будет ждать завершения других потоков
-  // Не знаю, как это поправить (???)
-  System.exit(0)
+  // Завершает работу executor
+  executorService.shutdown()
 }
