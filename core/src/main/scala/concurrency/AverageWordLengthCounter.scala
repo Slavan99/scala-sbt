@@ -5,65 +5,90 @@ import java.util.concurrent.Executors
 import cats.effect._
 import cats.syntax.parallel._
 
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutor}
 import scala.io.BufferedSource
 
 object AverageWordLengthCounter extends App {
-  // Подсчёт общей суммы слов для отдельной части массива
-  def getWordLengths(words: Array[String], startPos: Int, endPos: Int): Int =
-    words.slice(startPos, endPos).map(_.length).sum
+  // Подсчёт общей суммы слов для массива (сюда передаются части массива)
+  def getWordLengths(words: Array[String]): Int = {
+    val wordLengths = words.map(_.length)
+    wordLengths.sum
+  }
+
+  // функция, которая считает результат IO и время его работы, и оборачивает в ещё один IO
+  def measure[T](io: IO[T]): IO[(T, Long)] = {
+
+    val timestamp: Long = System.currentTimeMillis / 1000
+
+    val t = io.unsafeRunSync()
+
+    val time = System.currentTimeMillis / 1000 - timestamp
+
+    IO {
+      (t, time)
+    }
+
+
+  }
 
   private val executorService = Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors())
   // executors
-  implicit val executionContext: ExecutionContext = ExecutionContext.fromExecutor(executorService)
+  implicit val executionContext: ExecutionContextExecutor = ExecutionContext.fromExecutor(executorService)
   implicit val contextShift: ContextShift[IO] = IO.contextShift(implicitly[ExecutionContext])
 
   // здесь считываем какой-то большой файл
-  val source: BufferedSource = scala.io.Source.fromFile("bigtext.txt")
-  val text: String = source.mkString
-  source.close()
+  var source: BufferedSource = _
+  try {
+    source = scala.io.Source.fromFile("demo.txt")
+    val text: String = source.mkString
 
-  // преобразуем строку в массив слов, для больших текстов очень долго
-  val words: Array[String] = text.split("[\n.,\\-\";!? ]+").map(_.trim)
+    // преобразуем строку в массив слов, для больших текстов очень долго
+    val words: Array[String] = text.split("[\n.,\\-\";!? ]+").map(_.trim)
 
-  val wordsLength: Int = words.length
+    val wordsLength: Int = words.length
 
-  // разделитель массива на arrayDenominator частей, столько же будет IO-задач
-  val arrayDenominator = 5
+    // разделитель массива на arrayDenominator частей, столько же будет IO-задач
+    val arrayDenominator = 5
 
-  // ниже кусок кода с однопоточным вычислением средней длины
-  val timestamp: Long = System.currentTimeMillis / 1000
+    // ниже кусок кода с однопоточным вычислением средней длины
+    val timestamp: Long = System.currentTimeMillis / 1000
 
-  private val singleThreadResult = words.map(_.length).sum * 1.0 / wordsLength
+    val singleThreadResult = words.map(_.length).sum * 1.0 / wordsLength
 
-  println("Time of single thread calculation : " + (System.currentTimeMillis / 1000 - timestamp) + " s")
+    println("Time of single thread calculation : " + (System.currentTimeMillis / 1000 - timestamp) + " s")
 
-  println("Average word length : " + singleThreadResult)
+    println("Average word length : " + singleThreadResult)
 
 
-  // ниже кусок кода с многопоточным вычислением средней длины
-  val timestamp1: Long = System.currentTimeMillis / 1000
-
-  // разделяем массив, каждой IO-задаче передаём подсчёт суммы слов части массива с соотв-ими индексами
-  val ioCounters: Seq[IO[Int]] = for (
-    i <- 0 until arrayDenominator; dividedArrayLength = wordsLength / arrayDenominator)
-    yield if (i < arrayDenominator - 1) IO {
-      getWordLengths(words, dividedArrayLength * i, dividedArrayLength * (i + 1))
-    }
-    else IO {
-      getWordLengths(words, dividedArrayLength * i, wordsLength)
+    // использую итератор sliding для разделения массива, каждой IO передаю просто подмассив
+    val ioCounters: Seq[IO[Int]] = {
+      val slidingWordsIterator = words.sliding(arrayDenominator, arrayDenominator)
+      slidingWordsIterator.map(subList => IO {
+        getWordLengths(subList)
+      }).toList
     }
 
-  // сделал, как было в примере в лекции
-  val ioCountersParallel = ioCounters.map(io => IO.shift *> io)
+    // сделал, как было в примере в лекции
+    val ioCountersParallel = ioCounters.map(io => IO.shift *> io)
 
-  // нашёл метод parSequence и вызвал его, чтобы запускать unsafeRunSync только один раз
-  private val result = ioCountersParallel.parSequence.unsafeRunSync().sum * 1.0 / wordsLength
+    // вызвал для каждого IO соотв. задачу для замера времени работы
+    val subListMeasureResult: Seq[IO[(Int, Long)]] = ioCountersParallel.map(x => measure(x))
 
-  println("Time of multi thread calculation : " + (System.currentTimeMillis / 1000 - timestamp1) + " s")
+    val resultAndTime = for {
+      mes <- subListMeasureResult
+    } yield mes.unsafeRunSync()
 
-  println("Average word length : " + result)
+    val result = resultAndTime.map(_._1).sum * 1.0 / wordsLength
 
-  // Завершает работу executor
-  executorService.shutdown()
+    /* // нашёл метод parSequence и вызвал его, чтобы запускать unsafeRunSync только один раз
+     val result = ioCountersParallel.parSequence.unsafeRunSync().sum * 1.0 / wordsLength*/
+
+    println("Time of multi thread calculation : " + resultAndTime.map(_._2).sum + " s")
+
+    println("Average word length : " + result)
+
+    executorService.shutdown()
+  } finally {
+    source.close()
+  }
 }
